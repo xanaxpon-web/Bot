@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import threading
-from concurrent.futures import Future
 from pathlib import Path
 from typing import Coroutine, TypeVar
 
@@ -30,57 +29,54 @@ app = Flask(__name__)
 telegram_application = build_application()
 
 _T = TypeVar("_T")
-_loop = asyncio.new_event_loop()
-_loop_ready = threading.Event()
-_startup_lock: asyncio.Lock | None = None
+_loop: asyncio.AbstractEventLoop | None = None
+_loop_process_id: int | None = None
+_loop_lock = threading.Lock()
 _started = False
 
 
-def _run_event_loop() -> None:
-    asyncio.set_event_loop(_loop)
-    _loop_ready.set()
-    _loop.run_forever()
+def _run_async(coroutine: Coroutine[object, object, _T]) -> _T:
+    """Run PTB work serially on a loop owned by the current WSGI process."""
+    global _loop, _loop_process_id, _started
 
+    with _loop_lock:
+        process_id = os.getpid()
+        if _loop is None or _loop_process_id != process_id:
+            _loop = asyncio.new_event_loop()
+            _loop_process_id = process_id
+            _started = False
 
-_loop_thread = threading.Thread(
-    target=_run_event_loop,
-    name="telegram-asyncio-loop",
-    daemon=True,
-)
-_loop_thread.start()
-_loop_ready.wait()
-
-
-def _submit(coroutine: Coroutine[object, object, _T]) -> Future[_T]:
-    """Run a coroutine on the bot's persistent asyncio loop."""
-    return asyncio.run_coroutine_threadsafe(coroutine, _loop)
+        asyncio.set_event_loop(_loop)
+        return _loop.run_until_complete(coroutine)
 
 
 async def _ensure_application_started() -> None:
     """Initialize PTB once on the same loop used for all incoming updates."""
-    global _startup_lock, _started
+    global _started
 
     if _started:
         return
-    if _startup_lock is None:
-        _startup_lock = asyncio.Lock()
 
-    async with _startup_lock:
-        if _started:
-            return
-
-        await telegram_application.initialize()
-        if telegram_application.post_init is not None:
-            await telegram_application.post_init(telegram_application)
-        await telegram_application.start()
-        _started = True
-        logger.info("Telegram application initialized for webhook processing")
+    await telegram_application.initialize()
+    if telegram_application.post_init is not None:
+        await telegram_application.post_init(telegram_application)
+    await telegram_application.start()
+    _started = True
+    logger.info("Telegram application initialized for webhook processing")
 
 
-async def _enqueue_update(update_data: dict) -> None:
+async def _process_update(update_data: dict) -> None:
     await _ensure_application_started()
     update = Update.de_json(update_data, telegram_application.bot)
-    await telegram_application.update_queue.put(update)
+    await telegram_application.process_update(update)
+
+
+def _process_update_after_response(update_data: dict) -> None:
+    """Process an accepted update after the WSGI response has been emitted."""
+    try:
+        _run_async(_process_update(update_data))
+    except Exception:
+        logger.exception("Failed to process Telegram webhook update")
 
 
 @app.get("/")
@@ -94,10 +90,6 @@ def telegram_webhook() -> Response:
     if not isinstance(update_data, dict):
         return Response("Invalid Telegram update", status=400, mimetype="text/plain")
 
-    try:
-        _submit(_enqueue_update(update_data)).result(timeout=30)
-    except Exception:
-        logger.exception("Failed to accept Telegram webhook update")
-        return Response("Webhook processing failed", status=500, mimetype="text/plain")
-
-    return Response("OK", status=200, mimetype="text/plain")
+    response = Response("OK", status=200, mimetype="text/plain")
+    response.call_on_close(lambda: _process_update_after_response(update_data))
+    return response

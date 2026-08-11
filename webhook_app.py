@@ -81,7 +81,7 @@ def _process_update_after_response(update_data: dict) -> None:
 
 @app.get("/")
 def healthcheck() -> Response:
-    return Response("Bot is running", status=200, mimetype="text/plain")
+    return Response("Bot is running v2", status=200, mimetype="text/plain")
 
 
 @app.post("/telegram")

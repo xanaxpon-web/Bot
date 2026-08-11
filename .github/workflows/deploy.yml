@@ -52,14 +52,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          websites_json="$(curl --fail-with-body --silent --show-error \
+          webapps_json="$(curl --fail-with-body --silent --show-error \
             --request GET \
             --header "Authorization: Token ${PYTHONANYWHERE_API_TOKEN}" \
-            "https://www.pythonanywhere.com/api/v1/user/ctttuu/websites/")"
+            "https://www.pythonanywhere.com/api/v0/user/ctttuu/webapps/")"
 
           if ! jq --exit-status --arg domain "${PYTHONANYWHERE_DOMAIN}" \
             'any(.[]; .domain_name == $domain)' \
-            <<<"${websites_json}" >/dev/null; then
+            <<<"${webapps_json}" >/dev/null; then
             echo "PythonAnywhere Web App ${PYTHONANYWHERE_DOMAIN} was not found" >&2
             exit 1
           fi
@@ -75,4 +75,4 @@ jobs:
           curl --fail-with-body --silent --show-error \
             --request POST \
             --header "Authorization: Token ${PYTHONANYWHERE_API_TOKEN}" \
-            "https://www.pythonanywhere.com/api/v1/user/ctttuu/websites/ctttuu.pythonanywhere.com/reload/"
+            "https://www.pythonanywhere.com/api/v0/user/ctttuu/webapps/ctttuu.pythonanywhere.com/reload/"

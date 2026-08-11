@@ -48,7 +48,7 @@ ADMIN_ID = 1594601701
 SUPPORT_USERNAME = "exifsupport"
 PAYMENT_CARD = "4441 1144 6936 4374"
 
-DB_FILE = Path("users.db")
+DB_FILE = Path("/home/ctttuu/users.db")
 LEGACY_USER_FILE = Path("users.json")
 UPLOADS_DIR = Path("saved_photos")
 CRYPTO_API_URL = "https://pay.crypt.bot/api"

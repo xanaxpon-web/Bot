@@ -2167,7 +2167,8 @@ async def admin_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ============================================================
 
 
-def run_bot():
+def prepare_bot_storage() -> None:
+    """Initialize persistent bot data before polling or webhook startup."""
     if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬ_НОВЫЙ_BOT_TOKEN":
         raise RuntimeError(
             "Впиши BOT_TOKEN в блок НАСТРОЙКИ в начале файла."
@@ -2196,6 +2197,10 @@ def run_bot():
     if not CRYPTO_TOKEN or CRYPTO_TOKEN == "ВСТАВЬ_НОВЫЙ_CRYPTO_TOKEN":
         logger.warning("CRYPTO_TOKEN не задан — Crypto Bot платежи работать не будут")
 
+
+def build_application() -> Application:
+    """Build the Telegram application with all existing handlers."""
+    prepare_bot_storage()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("user", admin_user_command))
@@ -2213,6 +2218,11 @@ def run_bot():
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_doc))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_error_handler(error_handler)
+    return app
+
+
+def run_bot():
+    app = build_application()
 
     # run_polling сам управляет жизненным циклом; внешний while True здесь не нужен.
     app.run_polling(drop_pending_updates=False)

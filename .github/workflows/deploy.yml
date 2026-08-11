@@ -45,6 +45,27 @@ jobs:
           upload_file webhook_app.py
           upload_file requirements.txt
 
+      - name: Verify PythonAnywhere Web App
+        env:
+          PYTHONANYWHERE_API_TOKEN: ${{ secrets.PYTHONANYWHERE_API_TOKEN }}
+          PYTHONANYWHERE_DOMAIN: ctttuu.pythonanywhere.com
+        run: |
+          set -euo pipefail
+
+          websites_json="$(curl --fail-with-body --silent --show-error \
+            --request GET \
+            --header "Authorization: Token ${PYTHONANYWHERE_API_TOKEN}" \
+            "https://www.pythonanywhere.com/api/v1/user/ctttuu/websites/")"
+
+          if ! jq --exit-status --arg domain "${PYTHONANYWHERE_DOMAIN}" \
+            'any(.[]; .domain_name == $domain)' \
+            <<<"${websites_json}" >/dev/null; then
+            echo "PythonAnywhere Web App ${PYTHONANYWHERE_DOMAIN} was not found" >&2
+            exit 1
+          fi
+
+          echo "PythonAnywhere Web App ${PYTHONANYWHERE_DOMAIN} found"
+
       - name: Reload PythonAnywhere Web App
         env:
           PYTHONANYWHERE_API_TOKEN: ${{ secrets.PYTHONANYWHERE_API_TOKEN }}

@@ -1008,6 +1008,7 @@ def format_meta(data: dict) -> str:
 def get_main_keyboard(user_id: int):
     buttons = [
         ["📸 Как правильно отправить?"],
+        ["❓ Почему нет GPS?"],
         ["💰 Купить попытки"],
         ["🔗 Реферальная система"],
         ["👤 Мой профиль", "🕘 История анализов"],
@@ -1537,6 +1538,29 @@ def settings_keyboard():
          InlineKeyboardButton("🚨 Ошибки", callback_data="admin_toggle_notify_errors")],
     ])
 
+
+
+async def handle_why_no_gps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await access_guard(update):
+        return
+    uid = update.effective_user.id
+    if not anti_spam(uid):
+        return
+
+    await update.message.reply_text(
+        "📍 *Почему нет GPS?*\n\n"
+        "GPS определяется только тогда, когда в фотографии сохранены данные о месте съёмки.\n\n"
+        "❌ *GPS, скорее всего, не будет, если:*\n"
+        "— отправлен скриншот\n"
+        "— фото скачано из Instagram, Telegram или другого приложения\n"
+        "— фото было обработано или пересохранено\n"
+        "— при съёмке сохранение геолокации было отключено\n\n"
+        "✅ *Что нужно делать:*\n"
+        "Отправлять *оригинальную фотографию именно ФАЙЛОМ/ДОКУМЕНТОМ*, без сжатия и обработки.\n\n"
+        "Если фотография другого человека — необходимо получить от него оригинальный файл с его согласия.\n\n"
+        "⚠️ Даже в оригинальном файле GPS может отсутствовать, если камера не сохраняла геолокацию.",
+        parse_mode="Markdown",
+    )
 
 
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2214,6 +2238,9 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^admin_"))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
+    app.add_handler(
+        MessageHandler(filters.Regex(r"^❓ Почему нет GPS\?$"), handle_why_no_gps)
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_buttons))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_doc))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))

@@ -504,17 +504,121 @@ def remove_attempts(user_id: int, count: int) -> bool:
         return cur.rowcount == 1
 
 
-def get_user_uploads(user_id: int, limit: int = 10):
+def get_user_uploads(user_id: int, limit: int = 10, offset: int = 0):
     with db_connect() as conn:
         return conn.execute(
-            "SELECT * FROM uploads WHERE user_id=? ORDER BY id DESC LIMIT ?",
-            (int(user_id), int(limit)),
+            "SELECT * FROM uploads WHERE user_id=? ORDER BY id DESC LIMIT ? OFFSET ?",
+            (int(user_id), int(limit), max(0, int(offset))),
         ).fetchall()
 
 
 def get_upload(upload_id: int):
     with db_connect() as conn:
         return conn.execute("SELECT * FROM uploads WHERE id=?", (int(upload_id),)).fetchone()
+
+
+def get_admin_user_details(user_id: int) -> dict:
+    uid = int(user_id)
+    with db_connect() as conn:
+        uploads = conn.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(file_size), 0) AS total_size,
+                   MAX(uploaded_at) AS last_upload
+            FROM uploads WHERE user_id=?
+            """,
+            (uid,),
+        ).fetchone()
+        payments = conn.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END), 0) AS paid,
+                   COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END), 0) AS pending,
+                   COALESCE(SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END), 0) AS rejected
+            FROM payments WHERE user_id=?
+            """,
+            (uid,),
+        ).fetchone()
+        paid_totals = conn.execute(
+            """
+            SELECT currency, COALESCE(SUM(amount), 0) AS amount
+            FROM payments
+            WHERE user_id=? AND status='paid'
+            GROUP BY currency
+            ORDER BY currency
+            """,
+            (uid,),
+        ).fetchall()
+        return {
+            "upload_count": int(uploads["total"]),
+            "upload_size": int(uploads["total_size"]),
+            "last_upload": uploads["last_upload"],
+            "payment_count": int(payments["total"]),
+            "paid_count": int(payments["paid"]),
+            "pending_count": int(payments["pending"]),
+            "rejected_count": int(payments["rejected"]),
+            "paid_totals": [(row["currency"], row["amount"]) for row in paid_totals],
+        }
+
+
+def get_admin_user_activity(user_id: int, limit: int = 8, offset: int = 0):
+    uid = int(user_id)
+    with db_connect() as conn:
+        return conn.execute(
+            """
+            SELECT event_type, event_id, event_time, label, status, amount, currency, attempts
+            FROM (
+                SELECT 'registration' AS event_type,
+                       user_id AS event_id,
+                       reg AS event_time,
+                       NULL AS label,
+                       NULL AS status,
+                       NULL AS amount,
+                       NULL AS currency,
+                       NULL AS attempts
+                FROM users WHERE user_id=?
+
+                UNION ALL
+
+                SELECT 'upload', id, uploaded_at,
+                       COALESCE(original_name, stored_name),
+                       NULL, file_size, NULL, NULL
+                FROM uploads WHERE user_id=?
+
+                UNION ALL
+
+                SELECT 'payment', id, created_at, method,
+                       status, amount, currency, attempts
+                FROM payments WHERE user_id=?
+
+                UNION ALL
+
+                SELECT 'referral', referred_id, created_at,
+                       CAST(referred_id AS TEXT),
+                       NULL, NULL, NULL, NULL
+                FROM referrals WHERE referrer_id=?
+            )
+            ORDER BY event_time DESC
+            LIMIT ? OFFSET ?
+            """,
+            (uid, uid, uid, uid, int(limit), max(0, int(offset))),
+        ).fetchall()
+
+
+def get_admin_user_activity_count(user_id: int) -> int:
+    uid = int(user_id)
+    with db_connect() as conn:
+        return int(
+            conn.execute(
+                """
+                SELECT 1
+                     + (SELECT COUNT(*) FROM uploads WHERE user_id=?)
+                     + (SELECT COUNT(*) FROM payments WHERE user_id=?)
+                     + (SELECT COUNT(*) FROM referrals WHERE referrer_id=?)
+                """,
+                (uid, uid, uid),
+            ).fetchone()[0]
+        )
 
 
 def card_price_per_attempt() -> int:
@@ -1479,11 +1583,37 @@ async def send_admin_user_card(message, user_id: int):
     if not user:
         await message.reply_text("❌ Пользователь не найден.")
         return
-    uploads = get_user_uploads(user_id, 1000)
-    with db_connect() as conn:
-        paid_count = conn.execute("SELECT COUNT(*) FROM payments WHERE user_id=? AND status='paid'", (int(user_id),)).fetchone()[0]
+
+    details = get_admin_user_details(user_id)
+    telegram_name = "недоступно"
+    telegram_username = "не указан"
+    try:
+        chat = await message.get_bot().get_chat(int(user_id))
+        telegram_name = chat.full_name or "не указано"
+        if chat.username:
+            telegram_username = f"@{chat.username}"
+    except Exception as exc:
+        logger.info("Не удалось получить Telegram-профиль %s: %s", user_id, exc)
+
+    paid_totals = ", ".join(
+        f"{amount:g} {currency}" for currency, amount in details["paid_totals"]
+    ) or "0"
+    last_upload = "нет"
+    if details["last_upload"]:
+        last_upload = datetime.fromisoformat(details["last_upload"]).strftime("%d.%m.%Y %H:%M")
+    referrer = user.get("referrer") or "нет"
     status = "🚫 Заблокирован" if user.get("banned") else "✅ Активен"
     kb = [
+        [
+            InlineKeyboardButton(
+                f"📋 Активность ({get_admin_user_activity_count(user_id)})",
+                callback_data=f"admin_user_activity_{user_id}_0",
+            ),
+            InlineKeyboardButton(
+                f"🖼 Фото ({details['upload_count']})",
+                callback_data=f"admin_user_photos_{user_id}_0",
+            ),
+        ],
         [
             InlineKeyboardButton("➕ +1", callback_data=f"admin_user_add_{user_id}_1"),
             InlineKeyboardButton("➖ -1", callback_data=f"admin_user_sub_{user_id}_1"),
@@ -1498,16 +1628,145 @@ async def send_admin_user_card(message, user_id: int):
     await message.reply_text(
         "👤 КАРТОЧКА ПОЛЬЗОВАТЕЛЯ\n\n"
         f"🆔 ID: {user_id}\n"
-        f"📅 Регистрация: {datetime.fromisoformat(user['reg']).strftime('%m.%d.%Y %H:%M')}\n"
+        f"👤 Имя: {telegram_name}\n"
+        f"🔗 Username: {telegram_username}\n"
+        f"📅 Регистрация: {datetime.fromisoformat(user['reg']).strftime('%d.%m.%Y %H:%M')}\n"
         f"🔑 Попыток: {user['attempts']}\n"
         f"📊 Использовано: {user['used']}\n"
+        f"↩️ Пришёл от: {referrer}\n"
         f"🔗 Рефералов: {len(user['referrals'])}\n"
         f"🎁 Бонусов: {user['bonus']}\n"
-        f"🖼 Загрузок: {len(uploads)}\n"
-        f"💳 Успешных оплат: {paid_count}\n"
+        f"🖼 Загрузок: {details['upload_count']} ({details['upload_size'] / 1024 / 1024:.1f} МБ)\n"
+        f"🕘 Последняя загрузка: {last_upload}\n"
+        f"💳 Платежей: {details['payment_count']}\n"
+        f"✅ Успешных: {details['paid_count']} на {paid_totals}\n"
+        f"⏳ Ожидают: {details['pending_count']}  •  ❌ Отклонено: {details['rejected_count']}\n"
         f"Статус: {status}",
         reply_markup=InlineKeyboardMarkup(kb),
     )
+
+
+def format_admin_activity_time(value: str) -> str:
+    try:
+        return datetime.fromisoformat(value).strftime("%d.%m.%Y %H:%M")
+    except (TypeError, ValueError):
+        return str(value or "неизвестно")
+
+
+async def send_admin_user_activity(message, user_id: int, page: int = 0, edit: bool = False):
+    user = get_user(user_id)
+    if not user:
+        await message.reply_text("❌ Пользователь не найден.")
+        return
+
+    per_page = 8
+    total = get_admin_user_activity_count(user_id)
+    pages = max(1, (total + per_page - 1) // per_page)
+    page = max(0, min(int(page), pages - 1))
+    events = get_admin_user_activity(user_id, per_page, page * per_page)
+    lines = [
+        f"📋 АКТИВНОСТЬ ПОЛЬЗОВАТЕЛЯ {user_id}",
+        f"Записей: {total}  •  Страница {page + 1}/{pages}",
+        "",
+    ]
+    buttons = []
+    payment_statuses = {"paid": "✅ оплачен", "pending": "⏳ ожидает", "rejected": "❌ отклонён"}
+
+    for event in events:
+        event_time = format_admin_activity_time(event["event_time"])
+        event_type = event["event_type"]
+        if event_type == "registration":
+            lines.append(f"🆕 {event_time}\nРегистрация в боте")
+        elif event_type == "upload":
+            filename = " ".join(str(event["label"] or "изображение").split())[:70]
+            size = int(event["amount"] or 0) / 1024 / 1024
+            lines.append(f"🖼 {event_time}\nЗагрузка #{event['event_id']}: {filename} ({size:.1f} МБ)")
+            buttons.append([
+                InlineKeyboardButton(
+                    f"🖼 Открыть фото #{event['event_id']}",
+                    callback_data=f"admin_upload_{event['event_id']}",
+                )
+            ])
+        elif event_type == "payment":
+            payment_status = payment_statuses.get(event["status"], event["status"] or "неизвестно")
+            lines.append(
+                f"💳 {event_time}\nПлатёж #{event['event_id']}: "
+                f"{event['amount']:g} {event['currency']} • {event['label']} • "
+                f"{event['attempts']} попыток • {payment_status}"
+            )
+        elif event_type == "referral":
+            lines.append(f"🎁 {event_time}\nПриглашён пользователь {event['event_id']}")
+        lines.append("")
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"admin_user_activity_{user_id}_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="admin_users_noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"admin_user_activity_{user_id}_{page + 1}"))
+    buttons.append(nav)
+    buttons.append([InlineKeyboardButton("👤 Карточка пользователя", callback_data=f"admin_users_open_{user_id}_0")])
+
+    markup = InlineKeyboardMarkup(buttons)
+    text = "\n".join(lines).rstrip()
+    if edit:
+        await message.edit_text(text, reply_markup=markup)
+    else:
+        await message.reply_text(text, reply_markup=markup)
+
+
+async def send_admin_user_photos(message, user_id: int, page: int = 0, edit: bool = False):
+    if not get_user(user_id):
+        await message.reply_text("❌ Пользователь не найден.")
+        return
+
+    per_page = 6
+    total = get_admin_user_details(user_id)["upload_count"]
+    pages = max(1, (total + per_page - 1) // per_page)
+    page = max(0, min(int(page), pages - 1))
+    uploads = get_user_uploads(user_id, per_page, page * per_page)
+    lines = [
+        f"🖼 ФОТОГРАФИИ ПОЛЬЗОВАТЕЛЯ {user_id}",
+        f"Всего: {total}  •  Страница {page + 1}/{pages}",
+        "",
+    ]
+    buttons = []
+
+    if not uploads:
+        lines.append("Пользователь ещё не отправлял фотографии.")
+    for upload in uploads:
+        filename = " ".join(str(upload["original_name"] or upload["stored_name"]).split())[:70]
+        uploaded_at = format_admin_activity_time(upload["uploaded_at"])
+        size = int(upload["file_size"] or 0) / 1024 / 1024
+        file_available = Path(upload["file_path"]).exists()
+        file_status = "✅ файл хранится" if file_available else "🗑 файл уже удалён"
+        lines.append(
+            f"#{upload['id']} • {uploaded_at}\n"
+            f"{filename} • {size:.1f} МБ • {file_status}\n"
+        )
+        if file_available:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"📥 Скачать #{upload['id']}",
+                    callback_data=f"admin_upload_{upload['id']}",
+                )
+            ])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"admin_user_photos_{user_id}_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="admin_users_noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"admin_user_photos_{user_id}_{page + 1}"))
+    buttons.append(nav)
+    buttons.append([InlineKeyboardButton("👤 Карточка пользователя", callback_data=f"admin_users_open_{user_id}_0")])
+
+    markup = InlineKeyboardMarkup(buttons)
+    text = "\n".join(lines).rstrip()
+    if edit:
+        await message.edit_text(text, reply_markup=markup)
+    else:
+        await message.reply_text(text, reply_markup=markup)
 
 
 def settings_text() -> str:
@@ -2012,6 +2271,26 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, IndexError):
             return
         await send_admin_user_card(query.message, target_id)
+        return
+
+    if query.data.startswith("admin_user_activity_"):
+        try:
+            target_raw, page_raw = query.data.removeprefix("admin_user_activity_").rsplit("_", 1)
+            target_id = int(target_raw)
+            page = int(page_raw)
+        except (ValueError, IndexError):
+            return
+        await send_admin_user_activity(query.message, target_id, page, edit=True)
+        return
+
+    if query.data.startswith("admin_user_photos_"):
+        try:
+            target_raw, page_raw = query.data.removeprefix("admin_user_photos_").rsplit("_", 1)
+            target_id = int(target_raw)
+            page = int(page_raw)
+        except (ValueError, IndexError):
+            return
+        await send_admin_user_photos(query.message, target_id, page, edit=True)
         return
 
     if query.data.startswith("admin_user_add_") or query.data.startswith("admin_user_sub_"):

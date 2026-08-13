@@ -76,3 +76,36 @@ jobs:
             --request POST \
             --header "Authorization: Token ${PYTHONANYWHERE_API_TOKEN}" \
             "https://www.pythonanywhere.com/api/v0/user/ctttuu/webapps/ctttuu.pythonanywhere.com/reload/"
+
+      - name: Verify requested referral cleanup
+        env:
+          PYTHONANYWHERE_API_TOKEN: ${{ secrets.PYTHONANYWHERE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          result_url="https://www.pythonanywhere.com/api/v0/user/ctttuu/files/path/home/ctttuu/remove-referrals-887845876-20260813.json"
+          for attempt in $(seq 1 12); do
+            if curl --fail-with-body --silent --show-error \
+              --header "Authorization: Token ${PYTHONANYWHERE_API_TOKEN}" \
+              --output cleanup-result.json \
+              "${result_url}"; then
+              break
+            fi
+            if [ "${attempt}" -eq 12 ]; then
+              echo "Cleanup result was not created after Web App reload" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+          jq --exit-status \
+            '.ok == true
+             and .target_user_id == 887845876
+             and .attempts_after == 0
+             and .remaining_direct_referrals == 0
+             and .remaining_deleted_users == 0' \
+            cleanup-result.json >/dev/null
+
+          jq '{ok, target_user_id, attempts_before, attempts_after, deleted_user_ids,
+               deleted_user_count, deleted_upload_records, deleted_payment_records,
+               backup_path, completed_at}' cleanup-result.json

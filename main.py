@@ -1112,7 +1112,6 @@ def format_meta(data: dict) -> str:
 def get_main_keyboard(user_id: int):
     buttons = [
         ["📸 Как правильно отправить?"],
-        ["❓ Почему нет GPS?"],
         ["💰 Купить попытки"],
         ["🔗 Реферальная система"],
         ["👤 Мой профиль", "🕘 История анализов"],
@@ -1802,11 +1801,10 @@ def settings_keyboard():
 async def handle_why_no_gps(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await access_guard(update):
         return
-    uid = update.effective_user.id
-    if not anti_spam(uid):
-        return
+    query = update.callback_query
+    await query.answer()
 
-    await update.message.reply_text(
+    await query.message.reply_text(
         "📍 *Почему нет GPS?*\n\n"
         "GPS определяется только тогда, когда в фотографии сохранены данные о месте съёмки.\n\n"
         "❌ *GPS, скорее всего, не будет, если:*\n"
@@ -2152,6 +2150,10 @@ async def handle_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📍 Открыть на карте",
                 url=f"https://www.google.com/maps?q={data['lat']},{data['lon']}"
             )])
+        else:
+            buttons.append([
+                InlineKeyboardButton("❓ Почему нет GPS?", callback_data="why_no_gps")
+            ])
         if upload_id:
             buttons.append([
                 InlineKeyboardButton("🔬 Все метаданные", callback_data=f"user_fullmeta_{upload_id}")
@@ -2242,6 +2244,10 @@ async def user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]]
         if data.get("found") and data.get("lat") is not None and data.get("lon") is not None:
             buttons.insert(0, [InlineKeyboardButton("📍 Открыть на карте", url=f"https://www.google.com/maps?q={data['lat']},{data['lon']}")])
+        else:
+            buttons.insert(0, [
+                InlineKeyboardButton("❓ Почему нет GPS?", callback_data="why_no_gps")
+            ])
         await query.message.reply_text(summary, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
@@ -2507,6 +2513,7 @@ def build_application() -> Application:
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("user", admin_user_command))
+    app.add_handler(CallbackQueryHandler(handle_why_no_gps, pattern=r"^why_no_gps$"))
     app.add_handler(CallbackQueryHandler(user_callback, pattern=r"^(?:user_|pay_menu$)"))
     app.add_handler(
         CallbackQueryHandler(
@@ -2517,9 +2524,6 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^admin_"))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
-    app.add_handler(
-        MessageHandler(filters.Regex(r"^❓ Почему нет GPS\?$"), handle_why_no_gps)
-    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_buttons))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_doc))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
